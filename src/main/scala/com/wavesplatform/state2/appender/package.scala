@@ -54,13 +54,13 @@ package object appender extends ScorexLogging {
   private[appender] def appendBlock(checkpoint: CheckpointService, history: History, blockchainUpdater: BlockchainUpdater,
                                     stateReader: SnapshotStateReader, utxStorage: UtxPool, time: Time, settings: WavesSettings,
                                     featureProvider: FeatureProvider)(block: Block): Either[ValidationError, Option[Int]] = for {
-    _ <- Either.cond(checkpoint.isBlockValid(block.signerData.signature, history.height() + 1), (),
-      GenericError(s"Block $block at height ${history.height() + 1} is not valid w.r.t. checkpoint"))
+    _ <- Either.cond(checkpoint.isBlockValid(block.signerData.signature, history.height + 1), (),
+      GenericError(s"Block $block at height ${history.height + 1} is not valid w.r.t. checkpoint"))
     _ <- blockConsensusValidation(history, featureProvider, settings, time.correctedTime(), block) { height =>
-      PoSCalc.generatingBalance(stateReader, settings.blockchainSettings.functionalitySettings, block.signerData.generator, height).toEither.left.map(_.toString)
-        .flatMap(validateEffectiveBalance(featureProvider, settings.blockchainSettings.functionalitySettings, block, height))
+      val balance = PoSCalc.generatingBalance(stateReader, settings.blockchainSettings.functionalitySettings, block.signerData.generator, height)
+      validateEffectiveBalance(featureProvider, settings.blockchainSettings.functionalitySettings, block, height)(balance)
     }
-    baseHeight = history.height()
+    baseHeight = history.height
     maybeDiscardedTxs <- blockchainUpdater.processBlock(block)
   } yield {
     utxStorage.removeAll(block.transactionData)
@@ -69,7 +69,7 @@ package object appender extends ScorexLogging {
   }
 
   private def blockConsensusValidation(history: History, fp: FeatureProvider, settings: WavesSettings, currentTs: Long, block: Block)
-                                      (genBalance: Int => Either[String, Long]): Either[ValidationError, Unit] = history.read { _ =>
+                                      (genBalance: Int => Either[String, Long]): Either[ValidationError, Unit] = {
 
     val bcs = settings.blockchainSettings
     val fs = bcs.functionalitySettings
@@ -112,5 +112,4 @@ package object appender extends ScorexLogging {
       case x => x
     }
   }
-
 }

@@ -23,7 +23,7 @@ class AddressRouteSpec
   private val allAccounts = testWallet.privateKeyAccounts
   private val allAddresses = allAccounts.map(_.address)
 
-  private val route = AddressApiRoute(restAPISettings, testWallet, Coeval.now(mock[SnapshotStateReader]), TestFunctionalitySettings.Stub).route
+  private val route = AddressApiRoute(restAPISettings, testWallet, mock[SnapshotStateReader], TestFunctionalitySettings.Stub).route
 
   private val generatedMessages = for {
     account <- Gen.oneOf(allAccounts).label("account")

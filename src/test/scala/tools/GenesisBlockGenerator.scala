@@ -17,7 +17,7 @@ import scorex.wallet.Wallet
 
 import scala.concurrent.duration._
 
-object GenesisBlockGenerator extends App with TransactionGen {
+object GenesisBlockGenerator extends App {
 
   private type SeedText = String
   private type Share = Long

@@ -7,7 +7,7 @@ import akka.http.scaladsl.marshalling.ToResponseMarshallable
 import akka.http.scaladsl.server.Route
 import com.wavesplatform.crypto
 import com.wavesplatform.settings.{FunctionalitySettings, RestAPISettings}
-import com.wavesplatform.state2.StateReader
+import com.wavesplatform.state2.reader.SnapshotStateReader
 import io.swagger.annotations._
 import play.api.libs.json._
 import scorex.account.{Address, PublicKeyAccount}
@@ -19,7 +19,7 @@ import scala.util.{Failure, Success, Try}
 
 @Path("/addresses")
 @Api(value = "/addresses/", description = "Info about wallet's accounts and other calls about addresses")
-case class AddressApiRoute(settings: RestAPISettings, wallet: Wallet, state: StateReader, functionalitySettings: FunctionalitySettings) extends ApiRoute {
+case class AddressApiRoute(settings: RestAPISettings, wallet: Wallet, state: SnapshotStateReader, functionalitySettings: FunctionalitySettings) extends ApiRoute {
 
   import AddressApiRoute._
 
@@ -235,7 +235,7 @@ case class AddressApiRoute(settings: RestAPISettings, wallet: Wallet, state: Sta
     Address.fromString(address).right.map(acc => ToResponseMarshallable(Balance(
       acc.address,
       confirmations,
-      state().balanceWithConfirmations(acc, confirmations)
+      ???
     ))).getOrElse(InvalidAddress)
   }
 
@@ -243,33 +243,21 @@ case class AddressApiRoute(settings: RestAPISettings, wallet: Wallet, state: Sta
     Address.fromString(address).right.map(acc => ToResponseMarshallable(Balance(
       acc.address,
       0,
-      state().balance(acc)
+      state.wavesBalance(Address.fromString(address).right.get)
     ))).getOrElse(InvalidAddress)
   }
 
   private def balancesDetailsJson(account: Address): BalanceDetails = {
-    val s = state()
-    s.read { _ =>
-      val portfolio = s.accountPortfolio(account)
+      val portfolio = state.wavesBalance(account)
       BalanceDetails(
         account.address,
-        portfolio.balance,
-        PoSCalc.generatingBalance(s, functionalitySettings, account, s.height).get,
-        portfolio.balance - portfolio.leaseInfo.leaseOut,
-        s.effectiveBalance(account))
-    }
+        portfolio,
+        PoSCalc.generatingBalance(state, functionalitySettings, account, state.height),
+        ???,
+        ???)
   }
 
-  private def effectiveBalanceJson(address: String, confirmations: Int): ToResponseMarshallable = {
-    val s = state()
-    s.read { _ =>
-      Address.fromString(address).right.map(acc => ToResponseMarshallable(Balance(
-        acc.address,
-        confirmations,
-        s.effectiveBalanceAtHeightWithConfirmations(acc, s.height, confirmations).get)))
-        .getOrElse(InvalidAddress)
-    }
-  }
+  private def effectiveBalanceJson(address: String, confirmations: Int): ToResponseMarshallable = ???
 
   private def signPath(address: String, encode: Boolean) = (post & entity(as[String])) { message =>
     withAuth {

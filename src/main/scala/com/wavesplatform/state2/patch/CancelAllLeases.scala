@@ -1,16 +1,16 @@
 package com.wavesplatform.state2.patch
 
 import com.wavesplatform.state2.reader.SnapshotStateReader
-import com.wavesplatform.state2.{Diff, LeaseInfo, Portfolio}
+import com.wavesplatform.state2.{Diff, LeaseBalance, Portfolio}
 
 object CancelAllLeases {
   def apply(s: SnapshotStateReader): Diff = {
 
-    def invertLeaseInfo(l: LeaseInfo): LeaseInfo = LeaseInfo(-l.leaseIn, -l.leaseOut)
+    def invertLeaseInfo(l: LeaseBalance): LeaseBalance = LeaseBalance(-l.in, -l.out )
 
-    val portfolioUpd = s.accountPortfolios
-      .collect { case (acc, pf) if pf.leaseInfo != LeaseInfo.empty =>
-        acc -> Portfolio(0, invertLeaseInfo(pf.leaseInfo), Map.empty)
+    val portfolioUpd = s.nonZeroLeaseBalances
+      .collect { case (acc, pf) if pf != LeaseBalance.empty =>
+        acc -> Portfolio(0, invertLeaseInfo(pf), Map.empty)
       }
 
     Diff(transactions = Map.empty,
@@ -19,8 +19,6 @@ object CancelAllLeases {
       aliases = Map.empty,
       paymentTransactionIdsByHashes = Map.empty,
       orderFills = Map.empty,
-      leaseState = s.activeLeases().map(_ -> false).toMap,
-      scripts = Map.empty)
+      leaseState = s.activeLeases.map(_ -> false).toMap)
   }
-
 }

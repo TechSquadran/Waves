@@ -1,8 +1,7 @@
 package com.wavesplatform.state2.diffs
 
 import cats._
-import com.wavesplatform.state2._
-import com.wavesplatform.{NoShrink, TransactionGen, WithDB}
+import com.wavesplatform.{NoShrink, TransactionGen}
 import org.scalacheck.Gen
 import org.scalatest.prop.PropertyChecks
 import org.scalatest.{Matchers, PropSpec}
@@ -12,7 +11,7 @@ import scorex.transaction.GenesisTransaction
 import scorex.transaction.assets.{IssueTransaction, TransferTransaction}
 
 class TransferTransactionDiffTest extends PropSpec
-  with PropertyChecks with Matchers with TransactionGen with NoShrink with WithDB {
+  with PropertyChecks with Matchers with TransactionGen with NoShrink {
 
   val preconditionsAndTransfer: Gen[(GenesisTransaction, IssueTransaction, IssueTransaction, TransferTransaction)] = for {
     master <- accountGen
@@ -29,18 +28,19 @@ class TransferTransactionDiffTest extends PropSpec
 
   property("transfers assets to recipient preserving waves invariant") {
     forAll(preconditionsAndTransfer) { case ((genesis, issue1, issue2, transfer)) =>
-      assertDiffAndState(db, Seq(TestBlock.create(Seq(genesis, issue1, issue2))), TestBlock.create(Seq(transfer))) { case (totalDiff, newState) =>
-        val totalPortfolioDiff = Monoid.combineAll(totalDiff.txsDiff.portfolios.values)
+      assertDiffAndState(Seq(TestBlock.create(Seq(genesis, issue1, issue2))), TestBlock.create(Seq(transfer))) { case (totalDiff, newState) =>
+        val totalPortfolioDiff = Monoid.combineAll(totalDiff.portfolios.values)
         totalPortfolioDiff.balance shouldBe 0
         totalPortfolioDiff.effectiveBalance shouldBe 0
         totalPortfolioDiff.assets.values.foreach(_ shouldBe 0)
 
         val recipient: Address = transfer.recipient.asInstanceOf[Address]
-        val recipientPortfolio = newState.accountPortfolio(recipient)
+        val recipientAssets = newState.assetBalance(recipient)
+        val recipientBalances = newState.wavesBalance(recipient)
         if (transfer.sender.toAddress != recipient) {
           transfer.assetId match {
-            case Some(aid) => recipientPortfolio shouldBe Portfolio(0, LeaseInfo.empty, Map(aid -> transfer.amount))
-            case None => recipientPortfolio shouldBe Portfolio(transfer.amount, LeaseInfo.empty, Map.empty)
+            case Some(aid) => recipientAssets shouldBe Map(aid -> transfer.amount)
+            case None => recipientBalances shouldBe transfer.amount
           }
         }
       }

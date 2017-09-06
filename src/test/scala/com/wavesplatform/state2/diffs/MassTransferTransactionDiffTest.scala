@@ -2,8 +2,7 @@ package com.wavesplatform.state2.diffs
 
 import cats._
 import com.wavesplatform.features.BlockchainFeatures
-import com.wavesplatform.state2.{LeaseInfo, Portfolio}
-import com.wavesplatform.{NoShrink, TransactionGen, WithDB}
+import com.wavesplatform.{NoShrink, TransactionGen}
 import org.scalacheck.Gen
 import org.scalatest.prop.PropertyChecks
 import org.scalatest.{Matchers, PropSpec}
@@ -15,20 +14,20 @@ import scorex.transaction.assets.MassTransferTransaction.ParsedTransfer
 import scorex.transaction.assets.{IssueTransaction, MassTransferTransaction}
 
 class MassTransferTransactionDiffTest extends PropSpec
-  with PropertyChecks with Matchers with TransactionGen with NoShrink with WithDB {
+  with PropertyChecks with Matchers with TransactionGen with NoShrink {
 
   val fs = TestFunctionalitySettings.Enabled.copy(preActivatedFeatures = Map(BlockchainFeatures.MassTransfer.id -> 0))
 
-  val baseSetup: Gen[(GenesisTransaction, PrivateKeyAccount, Long)] = for {
+  val baseSetup: Gen[(GenesisTransaction, PrivateKeyAccount)] = for {
     master <- accountGen
     ts <- positiveLongGen
     genesis: GenesisTransaction = GenesisTransaction.create(master, ENOUGH_AMT, ts).right.get
-  } yield (genesis, master, ts)
+  } yield (genesis, master)
 
   property("MassTransfer preserves balance invariant") {
-    def testDiff(transferCount: Int) = {
+    def testDiff(transferCount: Int): Unit = {
       val setup = for {
-        (genesis, master, ts) <- baseSetup
+        (genesis, master) <- baseSetup
         transferGen = for {
           recipient <- accountGen.map(_.toAddress)
           amount <- Gen.choose(100000L, 1000000000L)
@@ -40,25 +39,27 @@ class MassTransferTransactionDiffTest extends PropSpec
       } yield (genesis, assetIssue, transfer)
 
       forAll(setup) { case (genesis, issue, transfer) =>
-        assertDiffAndState(db, Seq(block(Seq(genesis, issue))), block(Seq(transfer)), fs) { case (totalDiff, newState) =>
-          val totalPortfolioDiff = Monoid.combineAll(totalDiff.txsDiff.portfolios.values)
+        assertDiffAndState(Seq(block(Seq(genesis, issue))), block(Seq(transfer)), fs) { case (totalDiff, newState) =>
+          val totalPortfolioDiff = Monoid.combineAll(totalDiff.portfolios.values)
           totalPortfolioDiff.balance shouldBe 0
           totalPortfolioDiff.effectiveBalance shouldBe 0
           totalPortfolioDiff.assets.values.foreach(_ shouldBe 0)
 
           val totalAmount = transfer.transfers.map(_.amount).sum
           val fees = issue.fee + transfer.fee
-          val senderPortfolio = newState.accountPortfolio(transfer.sender)
+          val senderWavesBalance = newState.wavesBalance(transfer.sender)
+          val senderAssetBalance = newState.assetBalance(transfer.sender)
           transfer.assetId match {
-            case Some(aid) => senderPortfolio shouldBe Portfolio(ENOUGH_AMT - fees, LeaseInfo.empty, Map(aid -> (ENOUGH_AMT - totalAmount)))
-            case None => senderPortfolio.balance shouldBe (ENOUGH_AMT - fees - totalAmount)
+            case Some(aid) => senderAssetBalance shouldBe Map(aid -> (ENOUGH_AMT - totalAmount))
+            case None => senderWavesBalance shouldBe (ENOUGH_AMT - fees - totalAmount)
           }
           for (ParsedTransfer(recipient, amount) <- transfer.transfers) {
-            val recipientPortfolio = newState.accountPortfolio(recipient.asInstanceOf[Address])
+            val recipientWavesBalance = newState.wavesBalance(recipient.asInstanceOf[Address])
+            val recipientAssetBalance = newState.assetBalance(recipient.asInstanceOf[Address])
             if (transfer.sender.toAddress != recipient) {
               transfer.assetId match {
-                case Some(aid) => recipientPortfolio shouldBe Portfolio(0, LeaseInfo.empty, Map(aid -> amount))
-                case None => recipientPortfolio shouldBe Portfolio(amount, LeaseInfo.empty, Map.empty)
+                case Some(aid) => recipientAssetBalance shouldBe Map(aid -> amount)
+                case None => recipientWavesBalance shouldBe amount
               }
             }
           }
@@ -73,14 +74,14 @@ class MassTransferTransactionDiffTest extends PropSpec
 
   property("MassTransfer fails on non-existent alias") {
     val setup = for {
-      (genesis, master, ts) <- baseSetup
+      (genesis, master) <- baseSetup
       recipient <- aliasGen
       amount <- Gen.choose(100000L, 1000000000L)
       transfer <- massTransferGeneratorP(master, List(ParsedTransfer(recipient, amount)), None)
     } yield (genesis, transfer)
 
     forAll(setup) { case (genesis, transfer) =>
-      assertDiffEi(db, Seq(block(Seq(genesis))), block(Seq(transfer)), fs) { blockDiffEi =>
+      assertDiffEi(Seq(block(Seq(genesis))), block(Seq(transfer)), fs) { blockDiffEi =>
         blockDiffEi should produce("AliasNotExists")
       }
     }
@@ -88,7 +89,7 @@ class MassTransferTransactionDiffTest extends PropSpec
 
   property("MassTransfer fails on non-issued asset") {
     val setup = for {
-      (genesis, master, ts) <- baseSetup
+      (genesis, master) <- baseSetup
       recipient <- accountGen.map(_.toAddress)
       amount <- Gen.choose(100000L, 1000000000L)
       assetId <- assetIdGen.filter(_.isDefined)
@@ -96,7 +97,7 @@ class MassTransferTransactionDiffTest extends PropSpec
     } yield (genesis, transfer)
 
     forAll(setup) { case (genesis, transfer) =>
-      assertDiffEi(db, Seq(block(Seq(genesis))), block(Seq(transfer)), fs) { blockDiffEi =>
+      assertDiffEi(Seq(block(Seq(genesis))), block(Seq(transfer)), fs) { blockDiffEi =>
         blockDiffEi should produce("Attempt to transfer unavailable funds")
       }
     }
@@ -104,7 +105,7 @@ class MassTransferTransactionDiffTest extends PropSpec
 
   property("MassTransfer cannot overspend funds") {
     val setup = for {
-      (genesis, master, ts) <- baseSetup
+      (genesis, master) <- baseSetup
       recipients <- Gen.listOfN(2, accountGen.map(acc => ParsedTransfer(acc.toAddress, ENOUGH_AMT / 2 + 1)))
       (assetIssue: IssueTransaction, _, _) <- issueReissueBurnGeneratorP(ENOUGH_AMT, master)
       maybeAsset <- Gen.option(assetIssue)
@@ -112,7 +113,7 @@ class MassTransferTransactionDiffTest extends PropSpec
     } yield (genesis, transfer)
 
     forAll(setup) { case (genesis, transfer) =>
-      assertDiffEi(db, Seq(block(Seq(genesis))), block(Seq(transfer)), fs) { blockDiffEi =>
+      assertDiffEi(Seq(block(Seq(genesis))), block(Seq(transfer)), fs) { blockDiffEi =>
         blockDiffEi should produce("Attempt to transfer unavailable funds")
       }
     }
@@ -120,14 +121,14 @@ class MassTransferTransactionDiffTest extends PropSpec
 
   property("validation fails prior to feature activation") {
     val setup = for {
-      (genesis, master, ts) <- baseSetup
+      (genesis, master) <- baseSetup
       transfer <- massTransferGeneratorP(master, List(), None)
     } yield (genesis, transfer)
     val settings = TestFunctionalitySettings.Enabled.copy(preActivatedFeatures = Map(BlockchainFeatures.MassTransfer.id -> 10))
 
     forAll(setup) { case (genesis, transfer) =>
-      assertDiffEi(db, Seq(block(Seq(genesis))), block(Seq(transfer)), settings) { blockDiffEi =>
-        blockDiffEi should produce("MassTransferTransaction transaction has not been activated")
+      assertDiffEi(Seq(block(Seq(genesis))), block(Seq(transfer)), settings) { blockDiffEi =>
+        blockDiffEi should produce("MassTransferTransaction transaction has not been activated yet")
       }
     }
   }

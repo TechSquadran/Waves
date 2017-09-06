@@ -33,11 +33,11 @@ case class ActivationApiRoute(settings: RestAPISettings,
   ))
   def status: Route = (get & path("status")) {
 
-    val height = history.height()
+    val height = history.height
     val activationInterval = featuresProperties.featureCheckBlocksPeriodAtHeight(height)
     val blocksForFeatureActivation = featuresProperties.blocksForFeatureActivationAtHeight(height)
 
-    complete(Json.toJson(
+    complete(???/*Json.toJson(
       ActivationStatus(height,
         activationInterval,
         blocksForFeatureActivation,
@@ -56,7 +56,7 @@ case class ActivationApiRoute(settings: RestAPISettings,
             featureProvider.featureActivationHeight(id),
             if (status == BlockchainFeatureStatus.Undefined) featureProvider.featureVotesCountWithinActivationWindow(height).get(id).orElse(Some(0)) else None
           )
-        })))
+        })))*/
     )
   }
 }

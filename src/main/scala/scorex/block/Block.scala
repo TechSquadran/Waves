@@ -162,8 +162,8 @@ case class Block private(override val timestamp: Long,
   }.toList.map {
     case (maybeAssetId, feeVolume) =>
       maybeAssetId match {
-        case None => Portfolio(feeVolume, LeaseInfo.empty, Map.empty)
-        case Some(assetId) => Portfolio(0L, LeaseInfo.empty, Map(assetId -> feeVolume))
+        case None => Portfolio(feeVolume, LeaseBalance.empty, Map.empty)
+        case Some(assetId) => Portfolio(0L, LeaseBalance.empty, Map(assetId -> feeVolume))
       }
   }))
 

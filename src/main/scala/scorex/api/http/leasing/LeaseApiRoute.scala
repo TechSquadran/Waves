@@ -5,7 +5,7 @@ import javax.ws.rs.Path
 import akka.http.scaladsl.server.Route
 import com.wavesplatform.UtxPool
 import com.wavesplatform.settings.RestAPISettings
-import com.wavesplatform.state2.StateReader
+import com.wavesplatform.state2.reader.SnapshotStateReader
 import io.netty.channel.group.ChannelGroup
 import io.swagger.annotations._
 import scorex.BroadcastRoute
@@ -20,7 +20,7 @@ import scorex.wallet.Wallet
 
 @Path("/leasing")
 @Api(value = "/leasing")
-case class LeaseApiRoute(settings: RestAPISettings, wallet: Wallet, state: StateReader, utx: UtxPool, allChannels: ChannelGroup, time: Time)
+case class LeaseApiRoute(settings: RestAPISettings, wallet: Wallet, state: SnapshotStateReader, utx: UtxPool, allChannels: ChannelGroup, time: Time)
   extends ApiRoute with BroadcastRoute {
 
   override val route = pathPrefix("leasing") {
@@ -72,8 +72,8 @@ case class LeaseApiRoute(settings: RestAPISettings, wallet: Wallet, state: State
       Address.fromString(address) match {
         case Left(e) => ApiError.fromValidationError(e)
         case Right(a) =>
-          state().activeLeases()
-            .flatMap(state().transactionInfo)
+          state.activeLeases
+            .flatMap(state.transactionInfo)
             .collect { case (_, Some(lt: LeaseTransaction)) if lt.sender.address == address => lt }
       })
     }
