@@ -280,6 +280,11 @@ object AsyncHttpApi {
       actualBlock <- findBlock(_.height > currentBlock.height, currentBlock.height)
     } yield actualBlock
 
+    def waitForHeightArise: Future[Int] = for {
+      height <- height
+      newHeight <- waitForHeight(height + 1)
+    } yield newHeight
+
     def findBlock(cond: Block => Boolean, from: Int = 1, to: Int = Int.MaxValue): Future[Block] = {
       def load(_from: Int, _to: Int): Future[Block] = blockSeq(_from, _to).flatMap { blocks =>
         blocks.find(cond).fold[Future[Block]] {
