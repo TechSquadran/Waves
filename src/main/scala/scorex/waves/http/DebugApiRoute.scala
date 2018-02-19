@@ -8,11 +8,11 @@ import akka.http.scaladsl.marshalling.ToResponseMarshallable
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.server.Route
 import com.typesafe.config.{ConfigObject, ConfigRenderOptions}
-import com.wavesplatform.UtxPool
 import com.wavesplatform.mining.{Miner, MinerDebugInfo}
 import com.wavesplatform.network.{LocalScoreChanged, PeerDatabase, PeerInfo, _}
 import com.wavesplatform.settings.RestAPISettings
 import com.wavesplatform.state2.{ByteStr, LeaseInfo, Portfolio, StateReader}
+import com.wavesplatform.utx.UtxPool
 import io.netty.channel.Channel
 import io.netty.channel.group.ChannelGroup
 import io.swagger.annotations._
