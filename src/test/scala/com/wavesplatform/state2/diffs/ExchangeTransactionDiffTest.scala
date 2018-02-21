@@ -69,7 +69,7 @@ class ExchangeTransactionDiffTest
     } yield (gen1, gen2, setScript, issue1, issue2, exchange)
 
     forAll(preconditionsAndExchange) { case ((gen1, gen2, setScript, issue1, issue2, exchange)) =>
-      assertLeft(db, Seq(TestBlock.create(Seq(gen1, gen2, setScript, issue1, issue2))), TestBlock.create(Seq(exchange)), fs)("can't participate in ExchangeTransaction")
+      assertLeft(Seq(TestBlock.create(Seq(gen1, gen2, setScript, issue1, issue2))), TestBlock.create(Seq(exchange)), fs)("can't participate in ExchangeTransaction")
     }
   }
 

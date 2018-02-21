@@ -118,7 +118,7 @@ class CompositeStateReader(inner: SnapshotStateReader, maybeDiff: => Option[Diff
   }
 
   override def accountScript(address: Address): Option[Script] = {
-    blockDiff.txsDiff.scripts.get(address) match {
+    diff.scripts.get(address) match {
       case None => inner.accountScript(address)
       case Some(None) => None
       case Some(Some(scr)) => Some(scr)

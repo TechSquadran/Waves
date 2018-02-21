@@ -88,6 +88,8 @@ class SQLiteWriter(ds: DataSource, fs: FunctionalitySettings) extends Caches {
     query.bind(params: _*).list().apply()
   }
 
+  override def accountScript(address: Address) = ???
+
   override protected def loadAddressId(address: Address): BigInt = ???
 
   override protected def loadScore(): BigInt = roOpt(q.score).getOrElse(BigInt(0))

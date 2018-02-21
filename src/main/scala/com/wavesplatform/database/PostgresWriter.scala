@@ -22,6 +22,7 @@ import scorex.transaction.lease.{LeaseCancelTransaction, LeaseTransaction}
 class PostgresWriter(ds: DataSource) extends SnapshotStateReader with StateWriter {
   import PostgresWriter._
 
+  override def accountScript(address: Address) = ???
 
   override def status = ???
 

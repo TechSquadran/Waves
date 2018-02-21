@@ -1,13 +1,13 @@
 package com.wavesplatform.database
 
-import java.nio.ByteBuffer
-
-import com.google.common.io.ByteStreams.{newDataInput, newDataOutput}
-import com.google.common.primitives.{Ints, Longs}
+import com.wavesplatform.crypto
 import com.wavesplatform.state2._
 import com.wavesplatform.state2.reader.LeaseDetails
 import org.iq80.leveldb.{DB, ReadOptions}
 import scalikejdbc.using
+import scodec._
+import scodec.bits._
+import scodec.codecs._
 import scorex.account.{Address, Alias}
 import scorex.block.Block
 import scorex.transaction.assets.exchange.ExchangeTransaction
@@ -34,6 +34,8 @@ import scala.collection.mutable.ArrayBuffer
   *
   */
 object LevelDBWriter {
+
+
   trait Key[V] {
     def keyBytes: Array[Byte]
     def parse(bytes: Array[Byte]): V
@@ -41,172 +43,97 @@ object LevelDBWriter {
   }
 
   object Key {
-    def apply[V](key: Array[Byte], parser: Array[Byte] => V, encoder: V => Array[Byte]): Key[V] = new Key[V] {
+    def apply[V](key: Array[Byte], codec: Codec[V]): Key[V] = new Key[V] {
       override def keyBytes = key
-      override def parse(bytes: Array[Byte]) = parser(bytes)
-      override def encode(v: V) = encoder(v)
+      override def parse(bytes: Array[Byte]) = codec.decode(ByteVector(bytes).bits).require.value
+      override def encode(v: V) = codec.encode(v).require.toByteArray
     }
-
-    def opt[V](key: Array[Byte], parser: Array[Byte] => V, encoder: V => Array[Byte]): Key[Option[V]] =
-      apply[Option[V]](key, Option(_).map(parser), _.fold[Array[Byte]](null)(encoder))
   }
 
   object k {
-    private def h(prefix: Int, height: Int): Array[Byte] = {
-      val ndo = newDataOutput(6)
-      ndo.writeShort(prefix)
-      ndo.writeInt(height)
-      ndo.toByteArray
-    }
+    private def key[A, V](encoder: Encoder[A], value: A, codec: Codec[V]): Key[V] =
+      Key(encoder.encode(value).require.toByteArray, codec)
+    private def p[A](c: Codec[A]) = uint16 ~~ c
 
-    private def byteKeyWithH(prefix: Int, height: Int, bytes: Array[Byte]) = {
-      val ndo = newDataOutput(6 + bytes.length)
-      ndo.writeShort(prefix)
-      ndo.writeInt(height)
-      ndo.write(bytes)
-      ndo.toByteArray
-    }
+    private val block = bytes.xmap[Block](bv => Block.parseBytes(bv.toArray).get, b => ByteVector(b.bytes()))
+    private val bigInt = bytes.xmap[BigInt](bv => BigInt(bv.toArray), bi => ByteVector(bi.toByteArray))
+    private def byteStr(size: Int) = bytes(size).xmap[ByteStr](bv => ByteStr(bv.toArray), bs => ByteVector(bs.arr))
+    private val unboundedByteStr = bytes.xmap[ByteStr](bv => ByteStr(bv.toArray), bs => ByteVector(bs.arr))
+    private val digestByteStr = byteStr(crypto.DigestSize)
+    private val signatureByteStr = byteStr(crypto.SignatureLength)
+    private val addressCodec = bytes(Address.AddressLength).exmap[Address](
+      bv => Attempt.fromEither(Address.fromBytes(bv.toArray).left.map(e => Err(e.reason))),
+      a => Attempt.successful(ByteVector(a.bytes.arr)))
 
-    private def byteKey(prefix: Int, bytes: Array[Byte]) = {
-      val ndo = newDataOutput(2 + bytes.length)
-      ndo.writeShort(prefix)
-      ndo.write(bytes)
-      ndo.toByteArray
-    }
+    private val h = p(int32)
+    private val address = p(addressCodec)
+    private val digest = p(digestByteStr)
+    private val signature = p(signatureByteStr)
+    private val addressWithHeight = h ~~ addressCodec
+    private val digestWithHeight = h ~~ digestByteStr
 
-    private def addr(prefix: Int, address: Address) = byteKey(prefix, address.bytes.arr)
-    private def hash(prefix: Int, hashBytes: ByteStr) = byteKey(prefix, hashBytes.arr)
+    private val assetBalanceHistory = address ~~ digestByteStr
+    private val assetBalance = addressWithHeight ~~ digestByteStr
 
-    private def addressWithH(prefix: Int, height: Int, address: Address): Array[Byte] = {
-      val ndo = newDataOutput(6 + address.bytes.arr.length)
-      ndo.writeShort(prefix)
-      ndo.writeInt(height)
-      ndo.write(address.bytes.arr)
-      ndo.toByteArray
-    }
+    val height: Key[Int] = Key[Int](Array(0, 1), int32)
 
-    private def writeIntSeq(values: Seq[Int]): Array[Byte] = {
-      val ndo = newDataOutput()
-      ndo.writeInt(values.length)
-      values.foreach(ndo.writeInt)
-      ndo.toByteArray
-    }
+    def score(height: Int): Key[BigInt] = key(h, (2, height), bigInt)
 
-    private def readIntSeq(data: Array[Byte]): Seq[Int] = Option(data).fold(Seq.empty[Int]) { d =>
-      val ndi = newDataInput(d)
-      (1 to ndi.readInt()).map(_ => ndi.readInt())
-    }
+    def blockAt(height: Int): Key[Block] = key(h, (3, height), block)
+    def heightBySignature(blockId: ByteStr): Key[Int] = key(signature, (4, blockId), int32)
 
-    private def readByteStrSeq(chunkSize: Int)(data: Array[Byte]): Seq[ByteStr] = Option(data).fold(Seq.empty[ByteStr]) { d =>
-      val ndi = newDataInput(d)
-      (0 until ndi.readInt()).map { _ =>
-        val bytes = new Array[Byte](chunkSize)
-        ndi.readFully(bytes)
-        ByteStr(bytes)
-      }
-    }
+    def wavesBalanceHistory(a: Address): Key[List[Int]] = key(address, (5, a), list(int32))
 
-    private def writeByteStrSeq(values: Seq[ByteStr]) = {
-      val ndo = newDataOutput()
-      ndo.writeInt(values.length)
-      values.view.map(_.arr).foreach(ndo.write)
-      ndo.toByteArray
-    }
+    def wavesBalance(height: Int, address: Address): Key[Long] = key(addressWithHeight, (6, height, address), int64)
 
-    private def historyKey(prefix: Int, bytes: Array[Byte]) = Key(byteKey(prefix, bytes), readIntSeq, writeIntSeq)
+    def assetList(a: Address): Key[Set[ByteStr]] = key(address, (7, a), list(digestByteStr).xmap[Set[ByteStr]](_.toSet, _.toList))
+    def assetBalanceHistory(a: Address, id: ByteStr): Key[List[Int]] = key(assetBalanceHistory, (8, a, id), list(int32))
+    def assetBalance(height: Int, a: Address, id: ByteStr): Key[Long] = key(assetBalance, (9, height, a, id), int64)
 
-    val height: Key[Int] =
-      Key[Int](Array(0, 1), Option(_).fold(0)(Ints.fromByteArray), Ints.toByteArray)
+    private val assetInfo = (bool(8) :: bigInt).as[AssetInfo]
 
-    def score(height: Int) =
-      Key[BigInt](h(2, height), Option(_).fold(BigInt(0))(BigInt(_)), _.toByteArray)
+    def assetInfoHistory(assetId: ByteStr): Key[List[Int]] = key(digest, (10, assetId), list(int32))
+    def assetInfo(height: Int, assetId: ByteStr): Key[AssetInfo] = key(digestWithHeight, (11, height, assetId), assetInfo)
 
-    def blockAt(height: Int): Key[Option[Block]] = Key.opt[Block](h(3, height), Block.parseBytes(_).get, _.bytes())
-    def heightBySignature(blockId: ByteStr): Key[Option[Int]] = Key.opt(hash(4, blockId), Ints.fromByteArray, Ints.toByteArray)
+    private val leaseBalance = (int64 :: int64).as[LeaseBalance]
 
-    def wavesBalanceHistory(address: Address): Key[Seq[Int]] = historyKey(5, address.bytes.arr)
+    def leaseBalanceHistory(a: Address): Key[List[Int]] = key(address, (12, a), list(int32))
+    def leaseBalance(height: Int, address: Address): Key[LeaseBalance] = key(addressWithHeight, (13, height, address), leaseBalance)
 
-    def wavesBalance(height: Int, address: Address): Key[Long] =
-      Key(addressWithH(6, height, address), Option(_).fold(0L)(Longs.fromByteArray), Longs.toByteArray)
+    def leaseStatusHistory(leaseId: ByteStr): Key[List[Int]] = key(digest, (14, leaseId), list(int32))
+    def leaseStatus(height: Int, leaseId: ByteStr): Key[Boolean] = key(digestWithHeight, (15, height, leaseId), bool(8))
 
-    def assetList(address: Address): Key[Set[ByteStr]] = Key(addr(7, address), readByteStrSeq(32)(_).toSet, assets => writeByteStrSeq(assets.toSeq))
-    def assetBalanceHistory(address: Address, assetId: ByteStr): Key[Seq[Int]] = historyKey(8, address.bytes.arr ++ assetId.arr)
-    def assetBalance(height: Int, address: Address, assetId: ByteStr): Key[Long] =
-      Key(byteKeyWithH(9, height, address.bytes.arr ++ assetId.arr), Option(_).fold(0L)(Longs.fromByteArray), Longs.toByteArray)
+    private val volumeAndFee = (int64 :: int64).as[VolumeAndFee]
 
-    private def readAssetInfo(data: Array[Byte]) = {
-      val b = ByteBuffer.wrap(data)
-      AssetInfo(b.get() == 1, b.getLong)
-    }
-
-    private def writeAssetInfo(ai: AssetInfo) =
-      ByteBuffer.allocate(1 + 8).put((if (ai.isReissuable) 1 else 0): Byte).putLong(ai.volume.longValue()).array()
-
-    def assetInfoHistory(assetId: ByteStr): Key[Seq[Int]] = historyKey(10, assetId.arr)
-    def assetInfo(height: Int, assetId: ByteStr): Key[AssetInfo] = Key(byteKeyWithH(11, height, assetId.arr), readAssetInfo, writeAssetInfo)
-
-    private def writeLeaseBalance(lb: LeaseBalance): Array[Byte] = {
-      val ndo = newDataOutput()
-      ndo.writeLong(lb.in)
-      ndo.writeLong(lb.out)
-      ndo.toByteArray
-    }
-
-    private def readLeaseBalance(data: Array[Byte]) = Option(data).fold(LeaseBalance.empty) { d =>
-      val ndi = newDataInput(d)
-      LeaseBalance(ndi.readLong(), ndi.readLong())
-    }
-
-    def leaseBalanceHistory(address: Address): Key[Seq[Int]] = historyKey(12, address.bytes.arr)
-    def leaseBalance(height: Int, address: Address): Key[LeaseBalance] = Key(byteKeyWithH(13, height, address.bytes.arr), readLeaseBalance, writeLeaseBalance)
-
-    def leaseStatusHistory(leaseId: ByteStr): Key[Seq[Int]] = historyKey(14, leaseId.arr)
-    def leaseStatus(height: Int, leaseId: ByteStr): Key[Boolean] = Key(byteKeyWithH(15, height, leaseId.arr), _(0) == 1, active => Array[Byte](if (active) 1 else 0))
-
-    def filledVolumeAndFeeHistory(orderId: ByteStr): Key[Seq[Int]] = historyKey(16, orderId.arr)
-
-    private def readVolumeAndFee(data: Array[Byte]) = Option(data).fold(VolumeAndFee.empty) { d =>
-      val ndi = newDataInput(d)
-      VolumeAndFee(ndi.readLong(), ndi.readLong())
-    }
-
-    private def writeVolumeAndFee(vf: VolumeAndFee) = {
-      val ndo = newDataOutput()
-      ndo.writeLong(vf.volume)
-      ndo.writeLong(vf.fee)
-      ndo.toByteArray
-    }
-
-    def filledVolumeAndFee(height: Int, orderId: ByteStr): Key[VolumeAndFee] =
-      Key(byteKeyWithH(17, height, orderId.arr), readVolumeAndFee, writeVolumeAndFee)
+    def filledVolumeAndFeeHistory(orderId: ByteStr): Key[List[Int]] = key(digest, (16, orderId), list(int32))
+    def filledVolumeAndFee(height: Int, orderId: ByteStr): Key[VolumeAndFee] = key(digestWithHeight, (17, height, orderId), volumeAndFee)
 
 
-    private def readTransactionInfo(data: Array[Byte]) =
-      (Ints.fromByteArray(data), if (data.length == 4) None else Some(TransactionParser.parseBytes(data.drop(4)).get))
+    private val txGuard = Codec[Boolean](
+      (_: Boolean) => Attempt.successful(BitVector.empty),
+      (bv: BitVector) => Attempt.successful(DecodeResult(bv.nonEmpty, bv)))
+    private val transaction = bytes.exmap[Transaction](
+      bv => TransactionParser.parseBytes(bv.toArray).fold(e => Attempt.failure(Err(e.getMessage)), t => Attempt.successful(t)),
+      t => Attempt.successful(ByteVector(t.bytes()))
+    )
 
-    private def writeTransactionInfo(txInfo: (Int, Option[Transaction])) = txInfo match {
-      case (h, Some(tx)) =>
-        val txBytes = tx.bytes()
-        ByteBuffer.allocate(4 + txBytes.length).putInt(h).put(txBytes).array()
-      case (h, None) => Ints.toByteArray(h)
-    }
+    private val txCodec = int32 ~~ optional(txGuard, transaction)
 
-    def transactionInfo(txId: ByteStr): Key[Option[(Int, Option[Transaction])]] = Key.opt(hash(18, txId), readTransactionInfo, writeTransactionInfo)
+    def transactionInfo(txId: ByteStr): Key[(Int, Option[Transaction])] = key(p(unboundedByteStr), (18, txId), txCodec)
 
-    def addressTransactionHistory(address: Address): Key[Seq[Int]] = historyKey(19, address.bytes.arr)
+    def addressTransactionHistory(a: Address): Key[List[Int]] = key(address, (19, a), list(int32))
     def addressTransactionIds(height: Int, address: Address): Key[Seq[ByteStr]] = ???
 
 
-    def changedAddresses(height: Int): Key[Seq[Address]] = Key(h(20, height),
-      readByteStrSeq(Address.AddressLength)(_).map(bs => Address.fromBytes(bs.arr).explicitGet()),
-      addresses => writeByteStrSeq(addresses.map(_.bytes)))
-    def transactionIdsAtHeight(height: Int): Key[Seq[ByteStr]] = Key(h(21, height), readByteStrSeq(32), writeByteStrSeq)
+    def changedAddresses(height: Int): Key[List[Address]] = key(h, (20, height), list(addressCodec))
+    def transactionIdsAtHeight(height: Int): Key[List[ByteStr]] = key(h, (21, height), list(digestByteStr))
 
-    def addressOfAlias(alias: Alias): Key[Option[Address]] = Key.opt(byteKey(22, alias.bytes.arr), Address.fromBytes(_).explicitGet(), _.bytes.arr)
+    def addressOfAlias(alias: Alias): Key[Address] = key(int32 ~~ bytes, (22, ByteVector(alias.bytes.arr)), addressCodec)
   }
 
   class ReadOnlyDB(db: DB, readOptions: ReadOptions) {
     def get[V](key: Key[V]): V = key.parse(db.get(key.keyBytes))
+    def opt[V](key: Key[V]): Option[V] = Option(db.get(key.keyBytes)).map(key.parse)
   }
 
   class RW(db: DB) extends AutoCloseable {
@@ -215,6 +142,7 @@ object LevelDBWriter {
     private val readOptions = new ReadOptions().snapshot(snapshot)
 
     def get[V](key: Key[V]): V = key.parse(db.get(key.keyBytes, readOptions))
+    def opt[V](key: Key[V]): Option[V] = Option(db.get(key.keyBytes, readOptions)).map(key.parse)
 
     def put[V](key: Key[V], value: V): Unit = batch.put(key.keyBytes, key.encode(value))
 
@@ -243,35 +171,39 @@ class LevelDBWriter(writableDB: DB) extends Caches {
     f(new ReadOnlyDB(writableDB, new ReadOptions().snapshot(s)))
   }
 
+  override def accountScript(address: Address) = None
+
   private def readWrite[A](f: RW => A): A = using(new RW(writableDB)) { rw => f(rw) }
 
   override protected def loadAddressId(address: Address): BigInt = ???
 
-  override protected def loadHeight(): Int = readOnly(_.get(k.height))
+  private def loadHeightOpt(db: ReadOnlyDB) = db.opt(k.height).getOrElse(0)
 
-  override protected def loadScore(): BigInt = readOnly { db => db.get(k.score(db.get(k.height))) }
+  override protected def loadHeight(): Int = readOnly(loadHeightOpt)
 
-  override protected def loadLastBlock(): Option[Block] = readOnly { db => db.get(k.blockAt(db.get(k.height))) }
+  override protected def loadScore(): BigInt = readOnly { db => db.opt(k.score(loadHeightOpt(db))).getOrElse(BigInt(0)) }
+
+  override protected def loadLastBlock(): Option[Block] = readOnly { db => db.opt(k.blockAt(loadHeightOpt(db))) }
 
   override protected def loadWavesBalance(address: Address): Long = readOnly { db =>
-    db.get(k.wavesBalanceHistory(address)).headOption.fold(0L)(h => db.get(k.wavesBalance(h, address)))
+    db.opt(k.wavesBalanceHistory(address)).flatMap(_.headOption).fold(0L)(h => db.get(k.wavesBalance(h, address)))
   }
 
   override protected def loadLeaseBalance(address: Address): LeaseBalance = readOnly { db =>
-    db.get(k.leaseBalanceHistory(address)).headOption.fold(LeaseBalance.empty)(h => db.get(k.leaseBalance(h, address)))
+    db.opt(k.leaseBalanceHistory(address)).flatMap(_.headOption).fold(LeaseBalance.empty)(h => db.get(k.leaseBalance(h, address)))
   }
 
   override protected def loadAssetBalance(address: Address): Map[ByteStr, Long] = readOnly { db =>
     (for {
-      assetId <- db.get(k.assetList(address))
-      h <- db.get(k.assetBalanceHistory(address, assetId)).headOption
+      assetId <- db.opt(k.assetList(address)).getOrElse(Set.empty)
+      h <- db.opt(k.assetBalanceHistory(address, assetId))flatMap(_.headOption)
     } yield assetId -> db.get(k.assetBalance(h, address, assetId))).toMap
   }
 
   override protected def loadAssetInfo(assetId: ByteStr): Option[AssetInfo] = readOnly(LevelDBWriter.loadAssetInfo(_, assetId))
 
   override protected def loadAssetDescription(assetId: ByteStr): Option[AssetDescription] = readOnly { db =>
-    db.get(k.transactionInfo(assetId)) match {
+    db.opt(k.transactionInfo(assetId)) match {
       case Some((_, Some(i: IssueTransaction))) =>
         val reissuable = LevelDBWriter.loadAssetInfo(db, assetId).map(_.isReissuable)
         Some(AssetDescription(i.sender, i.name, i.decimals, reissuable.getOrElse(i.reissuable)))
@@ -287,8 +219,8 @@ class LevelDBWriter(writableDB: DB) extends Caches {
     db.get(k.leaseStatusHistory(leaseId)).headOption.fold(false)(h => db.get(k.leaseStatus(h, leaseId)))
   }
 
-  private def updateHistory(rw: RW, key: Key[Seq[Int]], threshold: Int, kf: Int => Key[_]): Seq[Array[Byte]] = {
-    val (c1, c2) = rw.get(key).partition(_ > threshold)
+  private def updateHistory(rw: RW, key: Key[List[Int]], threshold: Int, kf: Int => Key[_]): Seq[Array[Byte]] = {
+    val (c1, c2) = rw.opt(key).getOrElse(List.empty).partition(_ > threshold)
     rw.put(key, (height +: c1) ++ c2.headOption)
     c2.drop(1).map(kf(_).keyBytes)
   }
@@ -304,7 +236,7 @@ class LevelDBWriter(writableDB: DB) extends Caches {
     val expiredKeys = new ArrayBuffer[Array[Byte]]
 
     rw.put(k.height, height)
-    rw.put(k.blockAt(height), Some(block))
+    rw.put(k.blockAt(height), block)
 
     val threshold = height - 2000
 
@@ -346,20 +278,21 @@ class LevelDBWriter(writableDB: DB) extends Caches {
       }
 
       tx match {
-        case ca: CreateAliasTransaction => rw.put(k.addressOfAlias(ca.alias), Some(ca.sender.toAddress))
+        case ca: CreateAliasTransaction => rw.put(k.addressOfAlias(ca.alias), ca.sender.toAddress)
         case _ =>
       }
 
-      rw.put(k.transactionInfo(id), Some((height, txToSave)))
+      rw.put(k.transactionInfo(id), (height, txToSave))
     }
 
-    rw.put(k.transactionIdsAtHeight(height), transactions.keys.toSeq)
+    rw.put(k.transactionIdsAtHeight(height), transactions.keys.toList)
     expiredKeys.foreach(rw.delete)
   }
 
   override protected def doRollback(targetBlockId: ByteStr): Seq[Block] = readWrite { rw =>
-    rw.get(k.heightBySignature(targetBlockId)).fold(Seq.empty[Int])(_ to height).flatMap { h =>
-      val blockAtHeight = rw.get(k.blockAt(h))
+    val value = rw.opt(k.heightBySignature(targetBlockId)).fold(Seq.empty[Int])(_ to height)
+    value.flatMap { h =>
+      val blockAtHeight = rw.opt(k.blockAt(h))
       for (address <- rw.get(k.changedAddresses(h))) {
         for (assetId <- rw.get(k.assetList(address))) {
           rw.delete(k.assetBalance(h, address, assetId))
@@ -377,12 +310,13 @@ class LevelDBWriter(writableDB: DB) extends Caches {
       }
 
       for (txId <- rw.get(k.transactionIdsAtHeight(h))) {
-        rw.get(k.transactionInfo(txId)) match {
+        rw.opt(k.transactionInfo(txId)) match {
           case Some((_, Some(i: IssueTransaction))) =>
           case Some((_, Some(r: ReissueTransaction))) =>
           case Some((_, Some(c: LeaseCancelTransaction))) =>
           case Some((_, Some(l: LeaseTransaction))) =>
           case Some((_, Some(x: ExchangeTransaction))) =>
+          case _ =>
         }
       }
 
@@ -390,7 +324,7 @@ class LevelDBWriter(writableDB: DB) extends Caches {
     }
   }
 
-  override def transactionInfo(id: ByteStr) = readOnly(db => db.get(k.transactionInfo(id)))
+  override def transactionInfo(id: ByteStr) = readOnly(_.opt(k.transactionInfo(id)))
 
   override def addressTransactions(address: Address, types: Set[TransactionParser.TransactionType.Value], from: Int, count: Int) = ???
 
@@ -398,15 +332,13 @@ class LevelDBWriter(writableDB: DB) extends Caches {
 
   override def aliasesOfAddress(a: Address) = ???
 
-  override def resolveAlias(a: Alias): Option[Address] = readOnly(db => db.get(k.addressOfAlias(a)))
+  override def resolveAlias(a: Alias): Option[Address] = readOnly(_.opt(k.addressOfAlias(a)))
 
-  override def leaseDetails(leaseId: ByteStr) = readOnly { db =>
-    db.get(k.transactionInfo(leaseId)) match {
-      case Some((h, Some(lt: LeaseTransaction))) =>
-        Some(LeaseDetails(lt.sender, lt.recipient, h, lt.amount, loadLeaseStatus(leaseId)))
-      case _ => None
-    }
-  }
+  override def leaseDetails(leaseId: ByteStr) = readOnly(_.opt(k.transactionInfo(leaseId)) match {
+    case Some((h, Some(lt: LeaseTransaction))) =>
+      Some(LeaseDetails(lt.sender, lt.recipient, h, lt.amount, loadLeaseStatus(leaseId)))
+    case _ => None
+  })
 
   override def balanceSnapshots(address: Address, from: Int, to: Int) = ???
 
@@ -422,11 +354,8 @@ class LevelDBWriter(writableDB: DB) extends Caches {
 
   private def activeLeaseTransactions(db: ReadOnlyDB) =
     (1 to height).view
-      .flatMap { h =>
-        db.get(k.transactionIdsAtHeight(h))
-      }
-      .flatMap { id =>
-        db.get(k.transactionInfo(id)) }
+      .flatMap { h => db.get(k.transactionIdsAtHeight(h)) }
+      .flatMap { id => db.opt(k.transactionInfo(id)) }
       .collect {
         case (_, Some(lt: LeaseTransaction)) if loadLeaseStatus(lt.id()) => lt
       }
@@ -455,7 +384,7 @@ class LevelDBWriter(writableDB: DB) extends Caches {
 
   override def blockBytes(blockId: ByteStr) = ???
 
-  override def heightOf(blockId: ByteStr) = readOnly(_.get(k.heightBySignature(blockId)))
+  override def heightOf(blockId: ByteStr) = readOnly(_.opt(k.heightBySignature(blockId)))
 
   override def lastBlockIds(howMany: Int) = ???
 

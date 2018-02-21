@@ -3,9 +3,9 @@ package tools
 import java.io.{File, FileNotFoundException}
 
 import com.typesafe.config.ConfigFactory
+import com.wavesplatform.crypto
 import com.wavesplatform.settings.{GenesisSettings, GenesisTransactionSettings}
 import com.wavesplatform.state2._
-import com.wavesplatform.{TransactionGen, crypto}
 import net.ceedubs.ficus.Ficus._
 import net.ceedubs.ficus.readers.ArbitraryTypeReader._
 import scorex.account.{Address, AddressScheme, PrivateKeyAccount}
