@@ -4,7 +4,7 @@ import com.google.common.primitives.{Bytes, Ints, Longs}
 import com.wavesplatform.state2.ByteStr
 import monix.eval.Coeval
 import play.api.libs.json.{JsObject, Json}
-import scorex.account.{Address, PublicKeyAccount}
+import scorex.account.Address
 import scorex.crypto.hash.FastCryptographicHash._
 import scorex.transaction.TransactionParser._
 
@@ -16,7 +16,6 @@ case class GenesisTransaction private(recipient: Address, amount: Long, timestam
 
   override val assetFee: (Option[AssetId], Long) = (None, 0)
   override val id: Coeval[AssetId] = Coeval.evalOnce(signature)
-  override def sender: PublicKeyAccount = PublicKeyAccount.empty
 
   val transactionType = TransactionType.GenesisTransaction
 
